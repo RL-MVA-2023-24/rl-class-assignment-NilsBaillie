@@ -23,7 +23,6 @@ class ProjectAgent:
         self.gamma = gamma
         self.epsilon = epsilon
         self.Qfct = RandomForestRegressor()
-        self.dataset = deque(maxlen=100000)
         self.horiz = horiz
         self.n_iter = n_iter
     
