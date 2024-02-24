@@ -83,9 +83,11 @@ class ProjectAgent:
         if use_random :
             return np.random.randint(0, self.n_actions - 1)
         else :
-            Qvals = self.Qfct.predict([observation])
-            Pred_a = np.argmax(Qvals)
-            return Pred_a
+            Qvals = []
+            for a in range(self.n_actions):
+                obs_a = np.append(observation,a).reshape(1,-1)
+                Qvals.append(self.Qfct.predict(obs_a))
+            return np.argmax(Qvals)
 
 
     def save(self, path = 'FQI_agent.pkl'):
