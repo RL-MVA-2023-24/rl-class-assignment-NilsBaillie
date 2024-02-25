@@ -77,14 +77,14 @@ class ProjectAgent:
         self.Qfunction = joblib.load('FQI_ExtraTrees.pkl')
 
 # Train and save
-np.random.seed(1)
-horizon = 10**4
-nb_actions = env.action_space.n
-S, A, R, S2 = collect_samples(horizon)
-n_iter = 50
-gamma = 0.95
-Qfuncs = FQI(S, A, R, S2, n_iter, nb_actions, gamma)
-Qfunction = Qfuncs[-1]
-agent = ProjectAgent(Qfunction)
-agent.save()
+#np.random.seed(1)
+#horizon = 10**4
+#nb_actions = env.action_space.n
+#S, A, R, S2 = collect_samples(horizon)
+#n_iter = 50
+#gamma = 0.95
+#Qfuncs = FQI(S, A, R, S2, n_iter, nb_actions, gamma)
+#Qfunction = Qfuncs[-1]
+#agent = ProjectAgent(Qfunction)
+#agent.save()
 
