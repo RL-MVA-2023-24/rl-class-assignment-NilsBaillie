@@ -3,7 +3,6 @@ from env_hiv import HIVPatient
 from sklearn.ensemble import RandomForestRegressor,ExtraTreesRegressor
 import numpy as np
 import joblib
-from tqdm import tqdm
 
 env = TimeLimit(
     env=HIVPatient(domain_randomization=False), max_episode_steps=200
@@ -15,10 +14,10 @@ env = TimeLimit(
 # Don't modify the methods names and signatures, but you can add methods.
 # ENJOY!
 
-def collect_samples(horizon,disable_tqdm=False):
+def collect_samples(horizon):
         s,_ = env.reset()
         S,A,R,S2 = [],[],[],[]
-        for _ in tqdm(range(horizon), disable=disable_tqdm):
+        for _ in range(horizon):
             a = env.action_space.sample()
             s2, r, done, trunc, _ = env.step(a)
             S.append(s)
@@ -35,11 +34,11 @@ def collect_samples(horizon,disable_tqdm=False):
         S2= np.array(S2)
         return S, A, R, S2 
 
-def FQI(S,A,R,S2,n_iter,nb_actions,gamma,disable_tqdm=False):
+def FQI(S,A,R,S2,n_iter,nb_actions,gamma):
     Qfuncs = []
     nb_samples = S.shape[0]
     SA = np.append(S,A,axis=1)
-    for it in tqdm(range(n_iter), disable=disable_tqdm):
+    for it in range(n_iter):
         if it == 0:
             value=R.copy()
         else:
