@@ -46,8 +46,19 @@ def greedy_action(network, state):
 
 
 class ProjectAgent:
-    def __init__(self, config):
+    def __init__(self):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        config = {'nb_actions': env.action_space.n,
+          'learning_rate': 0.001,
+          'gamma': 0.98,
+          'buffer_size': 1000000,
+          'epsilon_min': 0.02,
+          'epsilon_max': 1.,
+          'epsilon_decay_period': 19000,
+          'epsilon_delay_decay': 100,
+          'batch_size': 780,
+          'criterion': nn.SmoothL1Loss(),
+          'nb_grad': 3}
         self.gamma = config['gamma']
         self.batch_size = config['batch_size']
         self.nb_actions = config['nb_actions']
@@ -170,22 +181,10 @@ class ProjectAgent:
         self.model.eval()
         return
 
-# DQN config
-config = {'nb_actions': env.action_space.n,
-          'learning_rate': 0.001,
-          'gamma': 0.98,
-          'buffer_size': 1000000,
-          'epsilon_min': 0.02,
-          'epsilon_max': 1.,
-          'epsilon_decay_period': 19000,
-          'epsilon_delay_decay': 100,
-          'batch_size': 780,
-          'criterion': nn.SmoothL1Loss(),
-          'nb_grad': 3}
 
 # Train, save and test the model
 #torch.manual_seed(1)
-#agent = ProjectAgent(config)
+#agent = ProjectAgent()
 #max_episode = 200
 #scores = agent.train(env, max_episode)
 #path = os.getcwd()
