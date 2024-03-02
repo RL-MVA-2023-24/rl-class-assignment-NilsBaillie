@@ -2,7 +2,12 @@ from gymnasium.wrappers import TimeLimit
 from env_hiv import HIVPatient
 from sklearn.ensemble import RandomForestRegressor,ExtraTreesRegressor
 import numpy as np
-import joblib
+import os
+from copy import deepcopy
+from evaluate import evaluate_HIV, evaluate_HIV_population
+import torch
+import torch.nn as nn
+import random
 
 env = TimeLimit(
     env=HIVPatient(domain_randomization=False), max_episode_steps=200
@@ -14,77 +19,177 @@ env = TimeLimit(
 # Don't modify the methods names and signatures, but you can add methods.
 # ENJOY!
 
-def collect_samples(horizon):
-        s,_ = env.reset()
-        S,A,R,S2 = [],[],[],[]
-        for _ in range(horizon):
-            a = env.action_space.sample()
-            s2, r, done, trunc, _ = env.step(a)
-            S.append(s)
-            A.append(a)
-            R.append(r)
-            S2.append(s2)
-            if trunc:
-                s, _ = env.reset()
-            else :
-                s = s2
-        S = np.array(S)
-        A = np.array(A).reshape((-1,1))
-        R = np.array(R)
-        S2= np.array(S2)
-        return S, A, R, S2 
+class ReplayBuffer:
+    def __init__(self, capacity, device):
+        self.capacity = capacity # capacity of the buffer
+        self.data = []
+        self.index = 0 # index of the next cell to be filled
+        self.device = device
+    def append(self, s, a, r, s_, d):
+        if len(self.data) < self.capacity:
+            self.data.append(None)
+        self.data[self.index] = (s, a, r, s_, d)
+        self.index = (self.index + 1) % self.capacity
+    def sample(self, batch_size):
+        batch = random.sample(self.data, batch_size)
+        return list(map(lambda x:torch.Tensor(np.array(x)).to(self.device), list(zip(*batch))))
+    def __len__(self):
+        return len(self.data)
 
-def FQI(S,A,R,S2,n_iter,nb_actions,gamma):
-    Qfuncs = []
-    nb_samples = S.shape[0]
-    SA = np.append(S,A,axis=1)
-    for it in range(n_iter):
-        if it == 0:
-            value=R.copy()
-        else:
-            Q2 = np.zeros((nb_samples,nb_actions))
-            for a2 in range(nb_actions):
-                A2 = a2*np.ones((nb_samples,1))
-                S2A2 = np.append(S2,A2,axis=1)
-                Q2[:,a2] = Qfuncs[-1].predict(S2A2)
-            max_Q2 = np.max(Q2,axis=1)
-            value = R + gamma*max_Q2
-        #Q = RandomForestRegressor()
-        Q = ExtraTreesRegressor(n_estimators=15)
-        Q.fit(SA,value)
-        Qfuncs.append(Q)
-    return Qfuncs
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def greedy_action(network, state):
+    device = "cuda" if next(network.parameters()).is_cuda else "cpu"
+    with torch.no_grad():
+        Q = network(torch.Tensor(state).unsqueeze(0).to(device))
+        return torch.argmax(Q).item()
+
 
 class ProjectAgent:
-    def __init__(self, Qfunction = None):
-        self.n_actions = env.action_space.n
-        self.Qfunction = Qfunction
-        
+    def __init__(self, config):
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.gamma = config['gamma']
+        self.batch_size = config['batch_size']
+        self.nb_actions = config['nb_actions']
+        self.memory = ReplayBuffer(config['buffer_size'], device)
+        self.epsilon_max = config['epsilon_max']
+        self.epsilon_min = config['epsilon_min']
+        self.epsilon_stop = config['epsilon_decay_period']
+        self.epsilon_delay = config['epsilon_delay_decay']
+        self.epsilon_step = (self.epsilon_max-self.epsilon_min)/self.epsilon_stop
+        self.model = self.NeuralNet(config,device) 
+        self.nb_grad = config['nb_grad']
+        self.criterion = config['criterion']
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=config['learning_rate'])
+        self.target_model = deepcopy(self.model).to(device)
+      
+    def NeuralNet(self,config,device):
+        state_dim = env.observation_space.shape[0]
+        nb_action = env.action_space.n 
+        nb_neurons = 512
+        NN = nn.Sequential(nn.Linear(state_dim, nb_neurons),nn.ReLU(),
+                          nn.Linear(nb_neurons, nb_neurons),nn.ReLU(), 
+                          nn.Linear(nb_neurons, nb_neurons),nn.ReLU(), 
+                          nn.Linear(nb_neurons, nb_neurons),nn.ReLU(),
+                          nn.Linear(nb_neurons, nb_neurons),nn.ReLU(),
+                          nn.Linear(nb_neurons, nb_action)).to(device)
+        return NN
+    
+    def gradient_step(self):
+        if len(self.memory) > self.batch_size:
+            X, A, R, Y, D = self.memory.sample(self.batch_size)
+            QYmax = self.target_model(Y).max(1)[0].detach()
+            update = torch.addcmul(R, 1-D, QYmax, value=self.gamma)
+            QXA = self.model(X).gather(1, A.to(torch.long).unsqueeze(1))
+            loss = self.criterion(QXA, update.unsqueeze(1))
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step() 
+    
+    def train(self, env, max_episode):
+        episode_return = []
+        episode = 0
+        episode_cum_reward = 0
+        state, _ = env.reset()
+        epsilon = self.epsilon_max
+        step = 0
+        prev_val = 0
+        update_target = 400
+        nb_skip_episodes = 60
+
+        while episode < max_episode:
+            # update epsilon
+            if step > self.epsilon_delay:
+                epsilon = max(self.epsilon_min, epsilon-self.epsilon_step)
+
+            # select epsilon-greedy action
+            if np.random.rand() < epsilon:
+                action = env.action_space.sample()
+            else:
+                action = greedy_action(self.model, state)
+
+            # step
+            next_state, reward, done, trunc, _ = env.step(action)
+            self.memory.append(state, action, reward, next_state, done)
+            episode_cum_reward += reward
+
+            # train
+            for _ in range(self.nb_grad): 
+                self.gradient_step()
+            if step % update_target == 0: 
+                    self.target_model.load_state_dict(self.model.state_dict())
+
+            # next transition
+            step += 1
+            if done or trunc:
+                episode += 1
+                if episode > nb_skip_episodes :
+                    val_agent = evaluate_HIV(agent=self, nb_episode=1)
+                else :
+                    val_agent = 0
+                
+                print("Episode ", '{:3d}'.format(episode), 
+                      ", Epsilon ", '{:6.2f}'.format(epsilon), 
+                      ", Batch size ", '{:5d}'.format(len(self.memory)), 
+                      ", Reward ", '{:.2e}'.format(episode_cum_reward),
+                      sep='')
+                state, _ = env.reset()
+                if val_agent > prev_val:
+                    prev_val = val_agent
+                    self.best_model = deepcopy(self.model).to(device)
+                    path = os.getcwd()
+                    self.save(path)
+                episode_return.append(episode_cum_reward)
+                episode_cum_reward = 0
+            else:
+                state = next_state
+                
+        self.model.load_state_dict(self.best_model.state_dict())
+        path = os.getcwd()
+        self.save(path)
+        return episode_return
+    
     def act(self, observation, use_random=False):
         if use_random :
-            return np.random.randint(0, self.n_actions - 1)
+            return np.random.randint(0, self.nb_actions)
         else :
-            Qvals = []
-            for a in range(self.n_actions):
-                obs_a = np.append(observation,a).reshape(1,-1)
-                Qvals.append(self.Qfunction.predict(obs_a))
-            return np.argmax(Qvals)
-
-    def save(self, path = 'FQI_ExtraTrees.pkl'):
-        joblib.dump(self.Qfunction, path)
-
+            with torch.no_grad():
+                Q = self.model(torch.Tensor(observation).unsqueeze(0).to(device))
+                return torch.argmax(Q).item()
+        
+    def save(self,path):
+        self.path = path + "/DQN_Agent.pt"
+        torch.save(self.model.state_dict(), self.path)
+        return
+        
     def load(self):
-        self.Qfunction = joblib.load('FQI_ExtraTrees.pkl')
+        device = torch.device('cpu')
+        self.path = os.getcwd() + "/DQN_Agent.pt"
+        self.model = self.NeuralNet({}, device)
+        self.model.load_state_dict(torch.load(self.path, map_location=device))
+        self.model.eval()
+        return
 
-# Train and save
-#np.random.seed(1)
-#horizon = 10**4
-#nb_actions = env.action_space.n
-#S, A, R, S2 = collect_samples(horizon)
-#n_iter = 50
-#gamma = 0.95
-#Qfuncs = FQI(S, A, R, S2, n_iter, nb_actions, gamma)
-#Qfunction = Qfuncs[-1]
-#agent = ProjectAgent(Qfunction)
-#agent.save()
+# DQN config
+config = {'nb_actions': env.action_space.n,
+          'learning_rate': 0.001,
+          'gamma': 0.98,
+          'buffer_size': 1000000,
+          'epsilon_min': 0.02,
+          'epsilon_max': 1.,
+          'epsilon_decay_period': 19000,
+          'epsilon_delay_decay': 100,
+          'batch_size': 780,
+          'criterion': nn.SmoothL1Loss(),
+          'nb_grad': 3}
 
+# Train, save and test the model
+#torch.manual_seed(1)
+#agent = ProjectAgent(config)
+#max_episode = 200
+#scores = agent.train(env, max_episode)
+#path = os.getcwd()
+#agent.save(path)
+#agent.load()
+#evaluate_HIV(agent=agent, nb_episode=1)
+#evaluate_HIV_population(agent=agent, nb_episode=15)
